@@ -1,3 +1,13 @@
+#include <atomic>
+#include <cstdint>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <Windows.h>
+
 #include <Helpers/Casting.hpp>
 #include <LuaType/LuaAActor.hpp>
 #include <LuaType/LuaCustomProperty.hpp>
@@ -42,6 +52,58 @@ namespace RC::LuaType
 {
     std::unordered_set<size_t> s_lua_unreal_objects{};
     std::mutex s_lua_unreal_objects_map_mutex{};
+
+    namespace
+    {
+        auto is_readable_address(const void* address, size_t size) -> bool
+        {
+            if (!address || size == 0)
+            {
+                return false;
+            }
+
+            MEMORY_BASIC_INFORMATION memory_info{};
+            if (VirtualQuery(address, &memory_info, sizeof(memory_info)) == 0)
+            {
+                return false;
+            }
+
+            if (memory_info.State != MEM_COMMIT || (memory_info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+            {
+                return false;
+            }
+
+            const auto protection = memory_info.Protect & 0xff;
+            const auto readable = protection == PAGE_READONLY || protection == PAGE_READWRITE || protection == PAGE_WRITECOPY ||
+                                  protection == PAGE_EXECUTE_READ || protection == PAGE_EXECUTE_READWRITE || protection == PAGE_EXECUTE_WRITECOPY;
+            if (!readable)
+            {
+                return false;
+            }
+
+            const auto begin = reinterpret_cast<uintptr_t>(address);
+            const auto region_begin = reinterpret_cast<uintptr_t>(memory_info.BaseAddress);
+            const auto region_end = region_begin + memory_info.RegionSize;
+            return begin >= region_begin && begin <= region_end && size <= region_end - begin;
+        }
+
+        auto is_live_unreal_object(Unreal::UObject* object) -> bool
+        {
+            const auto address = reinterpret_cast<uintptr_t>(object);
+            constexpr uintptr_t lowest_user_address = 0x10000;
+            constexpr uintptr_t highest_user_address = 0x00007FFFFFFFFFFF;
+
+            if (address < lowest_user_address || address > highest_user_address || (address % alignof(void*)) != 0 ||
+                !is_readable_address(object, 0x30))
+            {
+                return false;
+            }
+
+            const auto object_index = object->GetInternalIndex();
+            auto* object_item = Unreal::FUObjectArray::IndexToObject(object_index);
+            return object_item && object_item->GetUObject() == object && !object_item->IsUnreachable();
+        }
+    }
 
     auto add_to_global_unreal_objects_map(Unreal::UObject* object) -> void
     {
@@ -328,9 +390,20 @@ namespace RC::LuaType
 
     auto auto_construct_object(const LuaMadeSimple::Lua& lua, Unreal::UObject* object) -> void
     {
-        // If the UObject is nullptr (which is valid), then construct an empty Lua object to enable chaining
-        if (!object)
+        // Unreal can expose stale or sentinel UObject pointers while a world is
+        // transitioning. Never call IsA on those values: validate the pointer
+        // against GUObjectArray first and give Lua an invalid object instead.
+        if (!object || !is_live_unreal_object(object))
         {
+            if (object)
+            {
+                static std::atomic_bool invalid_pointer_reported{};
+                if (!invalid_pointer_reported.exchange(true))
+                {
+                    Output::send<LogLevel::Warning>(STR("[Lua] Rejected invalid UObject pointer {} while constructing a Lua object.\n"),
+                                                    static_cast<void*>(object));
+                }
+            }
             UObject::construct(lua, nullptr);
         }
         else if (object->IsA<Unreal::UFunction>())
