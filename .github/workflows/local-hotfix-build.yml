@@ -1,0 +1,21 @@
+name: Build local UE4SS hotfix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/cmake_build_ue4ss.yml
+    secrets: inherit
+    with:
+      build-mode: Game__Shipping__Win64
+      commit-sha: ${{ github.sha }}
+      should-upload-artifact: true
+      artifact-retention-days: 7
+      enable-caching: false
+      build-ue4ss: true
+      build-cppmods: false
+      build-uvtd: false
