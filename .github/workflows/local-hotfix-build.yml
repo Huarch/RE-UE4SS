@@ -2,6 +2,9 @@ name: Build local UE4SS hotfix
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - codex/fix-process-detach-cleanup
 
 permissions:
   contents: read
