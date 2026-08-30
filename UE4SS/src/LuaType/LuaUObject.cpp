@@ -187,7 +187,11 @@ namespace RC::LuaType
         uint16_t return_value_offset = func->GetReturnValueOffset();
 
         // Unreal::FProperty* param_next = func->get_child_properties<Unreal::FProperty*>();
-        Unreal::FProperty* return_value_property{};
+        // Some native functions in newer Unreal builds expose a stale
+        // ReturnValueOffset while their reflected return property is still
+        // correct. Prefer the reflected CPF_ReturnParm metadata and retain the
+        // legacy offset as a fallback for older layouts.
+        Unreal::FProperty* return_value_property = func->GetReturnProperty();
         Unreal::FName return_value_property_type{0u, 0u};
         int32_t return_value_property_offset_internal{};
 
@@ -203,7 +207,8 @@ namespace RC::LuaType
             // When return_value_offset is 0xFFFF it means that there is no return value so num_ufunc_params is accurate
             // Otherwise you must subtract 1 to account for the return value (stored in the same struct and counts as a param)
             // The ternary makes sure that we never have a negative number of params
-            bool has_return_value = return_value_offset != 0xFFFF;
+            const bool has_reflected_return_value = return_value_property != nullptr;
+            bool has_return_value = has_reflected_return_value || return_value_offset != 0xFFFF;
             uint8_t num_expected_params = num_ufunc_params;
             uint8_t num_expected_params_with_return_value = has_return_value ? (num_expected_params - 1 < 0 ? 0 : num_expected_params - 1) : num_expected_params;
 
@@ -241,7 +246,8 @@ namespace RC::LuaType
                 // Is the offset of this parameter is the same as the ReturnValueOffset in the UFunction ?
                 // If yes, then this parameter should be treated as the return value
                 // If no, then treat this as just another parameter
-                if (offset_internal == return_value_offset)
+                if (param_next->HasAnyPropertyFlags(Unreal::EPropertyFlags::CPF_ReturnParm) ||
+                    (!has_reflected_return_value && has_return_value && offset_internal == return_value_offset))
                 {
                     return_value_property = param_next;
                     return_value_property_type = property_type_fname;
